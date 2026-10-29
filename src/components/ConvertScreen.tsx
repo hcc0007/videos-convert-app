@@ -527,7 +527,7 @@ export function ConvertScreen() {
           </Pressable>
           {sourceType && targetType ? (
             <Text className="mt-3 text-sm leading-6 text-muted">
-              将把 {convertibleCount} 个 {source?.label} 文件转换为 {formatById(targetType)?.label}
+              将把 {convertibleCount} 个 {source?.label} 文件转换为 {formatById(targetType)?.label}，最多同时转换 3 个
               {alreadyCount > 0 ? `，跳过 ${alreadyCount} 个已转换文件` : ""}
               {heldCount > 0 ? `，${heldCount} 个已暂停` : ""}。
             </Text>

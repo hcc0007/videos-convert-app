@@ -1,11 +1,11 @@
 import { createServer } from "node:http";
 import { createReadStream } from "node:fs";
-import { mkdir, readFile, rename, rm, stat, unlink } from "node:fs/promises";
+import { mkdir, readFile, rename, rmdir, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { pickOutputFolder, pickVideoFiles } from "./dialogs.mjs";
-import { allocateOutputs, convertFile, findFfmpeg, matchesSource, outputExtension } from "./convert.mjs";
+import { allocateOutputs, convertFile, detectHardware, findFfmpeg, matchesSource, outputExtension } from "./convert.mjs";
 import { resumeProcess, suspendProcess, warmProcessControl } from "./process-control.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -67,7 +67,8 @@ async function serveStatic(res, pathname) {
   }
 }
 
-const PORT = 3927;
+const PORT = Number(process.env.PORT) || 3927;
+const CONVERT_SLOTS = 3;
 const jobs = new Map();
 let activeJobId = null;
 
@@ -209,22 +210,25 @@ async function ensureResumed(file) {
   file.suspended = false;
 }
 
-async function removePartialDir(partialDir) {
+async function removeEmptyPartialDir(partialDir) {
   if (path.basename(partialDir) !== ".converting") return;
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    try {
-      await rm(partialDir, { recursive: true, force: true });
-      return;
-    } catch (error) {
-      if (error?.code === "ENOENT") return;
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    }
-  }
+  await rmdir(partialDir).catch(() => undefined);
 }
 
 async function discardPart(file) {
   if (!file.part) return;
-  await removePartialDir(path.dirname(file.part));
+  const partialDir = path.dirname(file.part);
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      await unlink(file.part);
+      break;
+    } catch (error) {
+      if (error?.code === "ENOENT") break;
+      if (attempt === 9) return;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+  await removeEmptyPartialDir(partialDir);
 }
 
 async function stopEncoding(file) {
@@ -400,10 +404,11 @@ async function convertOne(job, ffmpeg, file) {
           if (file.removed || job.status === "cancelled" || file.status === "cancelled") api.stop();
         },
         onEncoder(child) {
+          file.settled = false;
           file.encoderPid = child.pid ?? null;
           file.encoder = child;
           child.once("close", () => {
-            file.settled = true;
+            if (file.encoder === child) file.settled = true;
           });
           void withFileLock(file, async () => {
             if (file.removed || job.status === "cancelled" || file.status === "cancelled") {
@@ -439,7 +444,7 @@ async function convertOne(job, ffmpeg, file) {
       return;
     }
     await rename(file.part, file.output);
-    await removePartialDir(path.dirname(file.part));
+    await removeEmptyPartialDir(path.dirname(file.part));
     file.status = "done";
     file.progress = 100;
     file.skipped = false;
@@ -466,7 +471,8 @@ async function convertOne(job, ffmpeg, file) {
 async function runJob(job, ffmpeg) {
   job.waiters = [];
   job.wakeId = 0;
-  try {
+
+  async function worker() {
     while (job.status !== "cancelled") {
       if (job.status === "paused") {
         await waitForChange(job);
@@ -474,13 +480,19 @@ async function runJob(job, ffmpeg) {
       }
       const file = job.files.find((item) => item.status === "pending");
       if (!file) {
-        const busy = job.files.some((item) => item.status === "paused" || item.status === "converting");
-        if (!busy) break;
-        await waitForChange(job);
-        continue;
+        if (job.files.some((item) => item.status === "paused" || item.status === "converting")) {
+          await waitForChange(job);
+          continue;
+        }
+        return;
       }
+      file.status = "converting";
       await convertOne(job, ffmpeg, file);
     }
+  }
+
+  try {
+    await Promise.all(Array.from({ length: CONVERT_SLOTS }, () => worker()));
   } finally {
     if (activeJobId === job.id) activeJobId = null;
     if (job.status === "running" || job.status === "paused") job.status = "done";
@@ -668,4 +680,9 @@ server.listen(PORT, "127.0.0.1", () => {
   void warmProcessControl().catch(() => {
     // 暂停时会再试一次
   });
+  if (ffmpeg) {
+    void detectHardware(ffmpeg).then((encoder) => {
+      console.log(encoder ? `显卡编码：h264_${encoder}` : "显卡编码不可用，使用软件编码");
+    });
+  }
 });

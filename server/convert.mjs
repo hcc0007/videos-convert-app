@@ -52,24 +52,104 @@ export function findFfmpeg() {
   return null;
 }
 
-function codecArgs(target) {
+const hardwareCache = new Map();
+let hardwareProbe = null;
+
+function encoderWorks(ffmpeg, hardware) {
+  return new Promise((resolve) => {
+    const child = spawn(
+      ffmpeg,
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=64x64:r=30:d=0.1",
+        "-frames:v",
+        "1",
+        ...h264Args(hardware),
+        "-f",
+        "null",
+        "-",
+      ],
+      { windowsHide: true },
+    );
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve(false);
+    }, 8000);
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve(code === 0);
+    });
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+  });
+}
+
+export function detectHardware(ffmpeg) {
+  if (hardwareCache.has(ffmpeg)) return Promise.resolve(hardwareCache.get(ffmpeg));
+  if (!hardwareProbe) {
+    hardwareProbe = (async () => {
+      const listed = spawnSync(ffmpeg, ["-hide_banner", "-encoders"], { encoding: "utf8", windowsHide: true });
+      const text = `${listed.stdout || ""}\n${listed.stderr || ""}`;
+      const candidates = ["nvenc", "qsv", "amf"].filter((name) => new RegExp(`\\bh264_${name}\\b`).test(text));
+      let encoder = null;
+      for (const name of candidates) {
+        if (await encoderWorks(ffmpeg, name)) {
+          encoder = name;
+          break;
+        }
+      }
+      hardwareCache.set(ffmpeg, encoder);
+      return encoder;
+    })().finally(() => {
+      hardwareProbe = null;
+    });
+  }
+  return hardwareProbe;
+}
+
+export function disableHardware(ffmpeg) {
+  hardwareCache.set(ffmpeg, null);
+}
+
+function h264Args(hardware) {
+  if (hardware === "nvenc") {
+    return ["-c:v", "h264_nvenc", "-preset", "p1", "-rc", "vbr", "-cq", "23", "-b:v", "0", "-pix_fmt", "yuv420p"];
+  }
+  if (hardware === "qsv") {
+    return ["-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", "23"];
+  }
+  if (hardware === "amf") {
+    return ["-c:v", "h264_amf", "-quality", "speed", "-rc", "cqp", "-qp_i", "23", "-qp_p", "23"];
+  }
+  return ["-c:v", "libx264", "-preset", "superfast", "-crf", "21", "-pix_fmt", "yuv420p", "-threads", "0"];
+}
+
+function codecArgs(target, hardware) {
+  const h264 = h264Args(["mp4", "mkv", "mov", "flv"].includes(target) ? hardware : null);
   switch (target) {
     case "mp4":
-      return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"];
-    case "avi":
-      return ["-c:v", "libxvid", "-q:v", "4", "-c:a", "libmp3lame", "-q:a", "3"];
+      return [...h264, "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"];
     case "mkv":
-      return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "192k"];
+      return [...h264, "-c:a", "aac", "-b:a", "192k"];
     case "mov":
-      return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k"];
-    case "webm":
-      return ["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "33", "-deadline", "good", "-cpu-used", "4", "-row-mt", "1", "-c:a", "libopus", "-b:a", "128k"];
+      return [...h264, "-c:a", "aac", "-b:a", "192k"];
     case "flv":
-      return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "128k"];
+      return [...h264, "-c:a", "aac", "-b:a", "128k"];
+    case "avi":
+      return ["-c:v", "mpeg4", "-q:v", "5", "-threads", "0", "-c:a", "libmp3lame", "-q:a", "3"];
+    case "webm":
+      return ["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "34", "-deadline", "realtime", "-cpu-used", "8", "-row-mt", "1", "-threads", "8", "-tile-columns", "2", "-c:a", "libopus", "-b:a", "128k"];
     case "wmv":
-      return ["-c:v", "wmv2", "-b:v", "2M", "-c:a", "wmav2", "-b:a", "128k"];
+      return ["-c:v", "wmv2", "-b:v", "2M", "-threads", "0", "-c:a", "wmav2", "-b:a", "128k"];
     case "mpeg":
-      return ["-c:v", "mpeg2video", "-b:v", "4M", "-c:a", "mp2", "-b:a", "192k"];
+      return ["-c:v", "mpeg2video", "-b:v", "4M", "-threads", "0", "-c:a", "mp2", "-b:a", "192k"];
     default:
       throw new Error(`不支持的目标格式：${target}`);
   }
@@ -81,23 +161,50 @@ function parseClock(value) {
   return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
 }
 
+function findFfprobe(ffmpeg) {
+  const candidate = path.join(path.dirname(ffmpeg), "ffprobe.exe");
+  try {
+    accessSync(candidate, constants.F_OK);
+    return candidate;
+  } catch {
+    return null;
+  }
+}
+
 function probeDuration(ffmpeg, input, control) {
   return new Promise((resolve) => {
     if (control.stopped()) {
       resolve(0);
       return;
     }
-    const child = spawn(ffmpeg, ["-hide_banner", "-nostdin", "-i", input], { windowsHide: true });
+    const ffprobe = findFfprobe(ffmpeg);
+    const child = spawn(
+      ffprobe ?? ffmpeg,
+      ffprobe
+        ? ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", input]
+        : ["-hide_banner", "-nostdin", "-probesize", "5000000", "-analyzeduration", "1000000", "-i", input],
+      { windowsHide: true },
+    );
     control.attach(child);
-    let stderr = "";
-    let duration = 0;
-    child.stderr.on("data", (chunk) => {
-      if (duration) return;
-      stderr = (stderr + chunk.toString("utf8")).slice(-8000);
-      const match = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(stderr);
-      if (match) duration = parseClock(`${match[1]}:${match[2]}:${match[3]}`) ?? 0;
+    let text = "";
+    const collect = (chunk) => {
+      text += chunk.toString("utf8");
+    };
+    child.stdout?.on("data", collect);
+    child.stderr?.on("data", collect);
+    child.on("close", () => {
+      if (control.stopped()) {
+        resolve(0);
+        return;
+      }
+      if (ffprobe) {
+        const seconds = Number.parseFloat(text.trim().split(/\r?\n/).pop());
+        resolve(Number.isFinite(seconds) && seconds > 0 ? seconds : 0);
+        return;
+      }
+      const match = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(text);
+      resolve(match ? parseClock(`${match[1]}:${match[2]}:${match[3]}`) ?? 0 : 0);
     });
-    child.on("close", () => resolve(control.stopped() ? 0 : duration));
     child.on("error", () => resolve(0));
   });
 }
@@ -150,7 +257,7 @@ export function convertFile(ffmpeg, input, output, target, onProgress, control =
       },
       stopped: () => stopRequested,
     })
-      .then((duration) => {
+      .then(async (duration) => {
         if (stopRequested) {
           reject(stoppedError());
           return;
@@ -161,61 +268,83 @@ export function convertFile(ffmpeg, input, output, target, onProgress, control =
           settled = true;
           handler(value);
         };
-        const child = spawn(
-          ffmpeg,
-          [
-            "-hide_banner",
-            "-nostdin",
-            "-y",
-            "-i",
-            input,
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a:0?",
-            "-sn",
-            ...codecArgs(target),
-            "-progress",
-            "pipe:1",
-            "-nostats",
-            output,
-          ],
-          { windowsHide: true },
-        );
-        current = child;
-        control.onEncoder?.(child);
-        let stderr = "";
-        child.stderr.on("data", (chunk) => {
-          stderr = (stderr + chunk.toString("utf8")).slice(-4000);
-        });
-        const lines = readline.createInterface({ input: child.stdout });
-        lines.on("line", (line) => {
-          if (line.startsWith("out_time=")) {
-            const clock = parseClock(line.slice("out_time=".length));
-            if (clock != null && duration > 0) {
-              onProgress(Math.max(0, Math.min(99, (clock / duration) * 100)));
-            }
-          }
-          if (line === "progress=end") onProgress(100);
-        });
-        child.on("error", (error) => {
-          lines.close();
-          finish(reject, error);
-        });
-        child.on("close", (code) => {
-          lines.close();
+        const hardware = await detectHardware(ffmpeg);
+        if (stopRequested) {
+          finish(reject, stoppedError());
+          return;
+        }
+        const launch = (useHardware) => {
           if (stopRequested) {
             finish(reject, stoppedError());
             return;
           }
-          if (code === 0) {
-            onProgress(100);
-            finish(resolve);
-            return;
-          }
-          const detail = stderr.trim().split(/\r?\n/).slice(-6).join(" ");
-          finish(reject, new Error(detail || `ffmpeg 退出码 ${code}`));
-        });
+          const child = spawn(
+            ffmpeg,
+            [
+              "-hide_banner",
+              "-nostdin",
+              "-threads",
+              "0",
+              "-y",
+              "-i",
+              input,
+              "-map",
+              "0:v:0",
+              "-map",
+              "0:a:0?",
+              "-sn",
+              ...codecArgs(target, useHardware ? hardware : null),
+              "-progress",
+              "pipe:1",
+              "-nostats",
+              output,
+            ],
+            { windowsHide: true },
+          );
+          current = child;
+          control.onEncoder?.(child);
+          let stderr = "";
+          child.stderr.on("data", (chunk) => {
+            stderr = (stderr + chunk.toString("utf8")).slice(-4000);
+          });
+          const lines = readline.createInterface({ input: child.stdout });
+          const closeLines = () => {
+            lines.close();
+          };
+          lines.on("line", (line) => {
+            if (line.startsWith("out_time=")) {
+              const clock = parseClock(line.slice("out_time=".length));
+              if (clock != null && duration > 0) {
+                onProgress(Math.max(0, Math.min(99, (clock / duration) * 100)));
+              }
+            }
+            if (line === "progress=end") onProgress(100);
+          });
+          child.on("error", (error) => {
+            closeLines();
+            finish(reject, error);
+          });
+          child.on("close", (code) => {
+            closeLines();
+            if (stopRequested) {
+              finish(reject, stoppedError());
+              return;
+            }
+            if (code === 0) {
+              onProgress(100);
+              finish(resolve);
+              return;
+            }
+            if (useHardware && hardware) {
+              disableHardware(ffmpeg);
+              launch(false);
+              return;
+            }
+            const detail = stderr.trim().split(/\r?\n/).slice(-6).join(" ");
+            finish(reject, new Error(detail || `ffmpeg 退出码 ${code}`));
+          });
+        };
+        launch(Boolean(hardware));
       })
       .catch(reject);
   });
