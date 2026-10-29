@@ -18,6 +18,7 @@ export type JobFile = {
   error?: string;
   skipped?: boolean;
   pausedFrom?: "pending" | "converting";
+  size?: number;
 };
 
 export type Job = {
@@ -84,6 +85,10 @@ export function startJob(input: {
 
 export function getJob(id: string) {
   return request<{ job: Job }>(`/api/jobs/${encodeURIComponent(id)}`);
+}
+
+export function getCurrentJob() {
+  return request<{ job: Job | null }>("/api/jobs/current");
 }
 
 export function pauseJob(id: string, input?: string) {

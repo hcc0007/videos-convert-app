@@ -1,10 +1,11 @@
 import { FolderOpen, Video } from "lucide-react-native";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Pressable, ScrollView, Text, View } from "react-native";
+import { Platform, Pressable, ScrollView, Text, View } from "react-native";
 import {
   cancelJob,
   checkHealth,
   checkOutputs,
+  getCurrentJob,
   getJob,
   pauseJob,
   pickFiles,
@@ -32,6 +33,32 @@ function formatBytes(size: number) {
 
 function fileNameOf(filePath: string) {
   return filePath.split(/[/\\]/).pop() ?? filePath;
+}
+
+const JOB_STORAGE_KEY = "convert-videos-job-id";
+
+function rememberJobId(id: string) {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(JOB_STORAGE_KEY, id);
+}
+
+function savedJobId() {
+  if (typeof localStorage === "undefined") return null;
+  return localStorage.getItem(JOB_STORAGE_KEY);
+}
+
+function forgetJobId() {
+  if (typeof localStorage === "undefined") return;
+  localStorage.removeItem(JOB_STORAGE_KEY);
+}
+
+function pickedFromJob(job: Job): PickedFile[] {
+  return job.files.map((file) => ({
+    path: file.input,
+    name: file.name,
+    size: file.size ?? 0,
+    ext: (file.input.match(/\.[^.\\/]+$/)?.[0] ?? "").toLowerCase(),
+  }));
 }
 
 function statusLabel(task: JobFile) {
@@ -108,13 +135,24 @@ export function ConvertScreen() {
   );
   const matchingKey = matchingFiles.map((file) => file.path).join("\n");
 
-  function applyJob(next: Job) {
+  function applyJob(next: Job, options?: { quiet?: boolean }) {
     const previous = jobRef.current;
     jobRef.current = next;
+    rememberJobId(next.id);
     setJob(next);
+    if (options?.quiet) return;
     const finished = next.status === "done" && next.files.length > 0;
     const newlyFinished = finished && (previous?.id !== next.id || previous.status !== "done");
     if (newlyFinished) setDoneOpen(true);
+  }
+
+  function restoreJob(next: Job) {
+    applyJob(next, { quiet: true });
+    setSourceType(next.sourceType);
+    setTargetType(next.targetType);
+    setOutputDir(next.outputDir);
+    setFiles(pickedFromJob(next));
+    setHeld([]);
   }
 
   function rememberOutputs(plans: OutputPlan[]) {
@@ -126,6 +164,45 @@ export function ConvertScreen() {
     return next;
   }
 
+  useEffect(() => {
+    let ignore = false;
+    async function loadExistingJob() {
+      try {
+        const current = await getCurrentJob();
+        if (current.job) return current.job;
+      } catch {
+        // 正在运行的服务还没有这个接口时，改用上次记下的任务编号
+      }
+      const saved = savedJobId();
+      if (!saved) return null;
+      try {
+        return (await getJob(saved)).job;
+      } catch {
+        forgetJobId();
+        return null;
+      }
+    }
+    loadExistingJob()
+      .then((existingJob) => {
+        if (!ignore && existingJob) restoreJob(existingJob);
+      })
+      .catch(() => undefined);
+    return () => {
+      ignore = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS !== "web" || typeof window === "undefined") return;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      const current = jobRef.current;
+      if (!current || (current.status !== "running" && current.status !== "paused")) return;
+      event.preventDefault();
+      event.returnValue = "还有视频正在转换，确定要关闭吗？";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, []);
   useEffect(() => {
     checkHealth()
       .then((health) => {
@@ -571,6 +648,11 @@ export function ConvertScreen() {
             accessibilityLabel="全部取消转换"
           />
         </View>
+        {jobActive ? (
+          <Text className="mt-3 text-center text-sm leading-5 text-muted">
+            关掉窗口前会先询问。转换在后台继续，重新打开窗口还能看到进度。
+          </Text>
+        ) : null}
         <Text className="mt-6 text-center text-xs text-muted">
           支持 {VIDEO_FORMATS.map((format) => format.label).join("、")}
         </Text>

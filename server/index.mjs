@@ -71,6 +71,7 @@ const PORT = Number(process.env.PORT) || 3927;
 const CONVERT_SLOTS = 3;
 const jobs = new Map();
 let activeJobId = null;
+let currentJobId = null;
 
 function send(res, status, body) {
   res.writeHead(status, {
@@ -144,6 +145,7 @@ function publicJob(job) {
       error: file.error,
       skipped: file.skipped || undefined,
       pausedFrom: file.pausedFrom,
+      size: file.size,
     })),
   };
 }
@@ -560,35 +562,24 @@ const server = createServer(async (req, res) => {
       }
       const selection = await prepareSelection(body);
       const paused = new Set(Array.isArray(body.paused) ? body.paused.filter((item) => typeof item === "string") : []);
-      const files = selection.plans.map((plan) => {
-        if (plan.skipped) {
-          return {
+      const files = await Promise.all(
+        selection.plans.map(async (plan) => {
+          const info = await stat(plan.input).catch(() => null);
+          const base = {
             input: plan.input,
             name: path.basename(plan.input),
             output: plan.output,
-            progress: 100,
-            status: "done",
-            skipped: true,
+            size: info?.size ?? 0,
           };
-        }
-        if (paused.has(plan.input)) {
-          return {
-            input: plan.input,
-            name: path.basename(plan.input),
-            output: plan.output,
-            progress: 0,
-            status: "paused",
-            pausedFrom: "pending",
-          };
-        }
-        return {
-          input: plan.input,
-          name: path.basename(plan.input),
-          output: plan.output,
-          progress: 0,
-          status: "pending",
-        };
-      });
+          if (plan.skipped) {
+            return { ...base, progress: 100, status: "done", skipped: true };
+          }
+          if (paused.has(plan.input)) {
+            return { ...base, progress: 0, status: "paused", pausedFrom: "pending" };
+          }
+          return { ...base, progress: 0, status: "pending" };
+        }),
+      );
       const hasPending = files.some((file) => file.status === "pending");
       const hasPaused = files.some((file) => file.status === "paused");
       const job = {
@@ -602,6 +593,7 @@ const server = createServer(async (req, res) => {
         wakeId: 0,
       };
       jobs.set(job.id, job);
+      currentJobId = job.id;
       if (job.status !== "done") {
         activeJobId = job.id;
         void runJob(job, ffmpeg);
@@ -647,6 +639,12 @@ const server = createServer(async (req, res) => {
         await cancelAll(job);
       }
       send(res, 200, { job: publicJob(job) });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/jobs/current") {
+      const job = currentJobId ? jobs.get(currentJobId) : null;
+      send(res, 200, { job: job ? publicJob(job) : null });
       return;
     }
 
