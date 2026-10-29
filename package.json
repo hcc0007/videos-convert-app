@@ -1,0 +1,45 @@
+{
+  "name": "convert-videos",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "dependencies": {
+    "@expo/metro-runtime": "~58.0.15",
+    "@rn-primitives/dialog": "^1.5.2",
+    "@rn-primitives/label": "^1.5.2",
+    "@rn-primitives/portal": "^1.5.3",
+    "@rn-primitives/progress": "^1.5.2",
+    "@rn-primitives/select": "^1.5.2",
+    "@rn-primitives/slot": "^1.5.2",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "expo": "~58.0.19",
+    "expo-status-bar": "~58.0.4",
+    "lucide-react-native": "^1.61.0",
+    "nativewind": "^4.2.7",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-native": "0.88.0",
+    "react-native-reanimated": "4.7.1",
+    "react-native-safe-area-context": "~5.10.1",
+    "react-native-svg": "15.16.0",
+    "react-native-web": "^0.21.4",
+    "react-native-worklets": "0.13.0",
+    "tailwind-merge": "^3.7.0"
+  },
+  "devDependencies": {
+    "@types/react": "~19.3.0",
+    "babel-preset-expo": "~58.0.20",
+    "tailwindcss": "^3.4.17",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "start": "node scripts/dev.mjs",
+    "server": "node server/index.mjs",
+    "build:web": "expo export --platform web --output-dir dist",
+    "open": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/open-app.ps1",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web"
+  },
+  "private": true
+}
